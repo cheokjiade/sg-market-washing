@@ -15,6 +15,7 @@ from flask import Flask, render_template_string, request, jsonify
 
 from sg_market_status.checker import (
     get_closures_on_date,
+    get_map_data,
     get_upcoming_closures,
     search_market,
 )
@@ -28,6 +29,8 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SG Market Status Checker</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -121,6 +124,23 @@ HTML_TEMPLATE = """
             font-size: 0.85em;
         }
         footer a { color: #e53935; text-decoration: none; }
+        #map { height: 500px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .legend {
+            background: white;
+            padding: 10px 14px;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+            line-height: 1.8;
+            font-size: 0.9em;
+        }
+        .legend-dot {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
     </style>
 </head>
 <body>
@@ -135,6 +155,7 @@ HTML_TEMPLATE = """
             <div class="tab" onclick="switchTab('upcoming')">Upcoming Closures</div>
             <div class="tab" onclick="switchTab('search')">Search Market</div>
             <div class="tab" onclick="switchTab('date')">Check Date</div>
+            <div class="tab" onclick="switchTab('map')">Map View</div>
         </div>
 
         <div id="panel-today" class="panel">
@@ -172,6 +193,10 @@ HTML_TEMPLATE = """
             <div id="date-results"></div>
         </div>
 
+        <div id="panel-map" class="panel" style="display:none">
+            <div id="map"></div>
+        </div>
+
         <footer>
             Data from <a href="https://data.gov.sg" target="_blank">data.gov.sg</a> (NEA)
         </footer>
@@ -186,6 +211,7 @@ HTML_TEMPLATE = """
 
             if (tab === 'today') loadToday();
             if (tab === 'upcoming') loadUpcoming();
+            if (tab === 'map') loadMap();
         }
 
         function renderClosures(closures, container) {
@@ -261,6 +287,68 @@ HTML_TEMPLATE = """
             renderClosures(data.closures, 'date-results');
         }
 
+        let mapInstance = null;
+        let mapLoaded = false;
+
+        async function loadMap() {
+            if (mapLoaded) {
+                mapInstance.invalidateSize();
+                return;
+            }
+
+            // Initialise Leaflet map centred on Singapore
+            mapInstance = L.map('map').setView([1.3521, 103.8198], 12);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors',
+                maxZoom: 19,
+            }).addTo(mapInstance);
+
+            // Add legend
+            const legend = L.control({ position: 'bottomright' });
+            legend.onAdd = function () {
+                const div = L.DomUtil.create('div', 'legend');
+                div.innerHTML =
+                    '<strong>Status</strong><br>' +
+                    '<span class="legend-dot" style="background:#d32f2f"></span> Closed today<br>' +
+                    '<span class="legend-dot" style="background:#f9a825"></span> Closing within 7 days<br>' +
+                    '<span class="legend-dot" style="background:#388e3c"></span> Open';
+                return div;
+            };
+            legend.addTo(mapInstance);
+
+            // Fetch marker data
+            const res = await fetch('/api/map');
+            const data = await res.json();
+
+            const colourHex = { red: '#d32f2f', yellow: '#f9a825', green: '#388e3c' };
+
+            data.markers.forEach(m => {
+                const colour = colourHex[m.colour] || '#388e3c';
+                const circle = L.circleMarker([m.lat, m.lng], {
+                    radius: 8,
+                    fillColor: colour,
+                    color: '#fff',
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 0.9,
+                }).addTo(mapInstance);
+
+                let popup = '<strong>' + m.name + '</strong>';
+                if (m.address) popup += '<br>' + m.address;
+                if (m.status === 'closed') {
+                    popup += '<br><span style="color:#d32f2f;font-weight:600">CLOSED</span>';
+                } else if (m.status === 'closing_soon') {
+                    popup += '<br><span style="color:#f9a825;font-weight:600">CLOSING SOON</span>';
+                } else {
+                    popup += '<br><span style="color:#388e3c;font-weight:600">OPEN</span>';
+                }
+                if (m.closure_info) popup += '<br><em>' + m.closure_info + '</em>';
+                circle.bindPopup(popup);
+            });
+
+            mapLoaded = true;
+        }
+
         // Load today's closures on page load
         loadToday();
     </script>
@@ -295,6 +383,12 @@ def api_search():
         return jsonify({"error": "Please provide a search query (?q=name)"}), 400
     results = search_market(query)
     return jsonify({"query": query, "results": results})
+
+
+@app.route("/api/map")
+def api_map():
+    markers = get_map_data()
+    return jsonify({"markers": markers})
 
 
 @app.route("/api/date")

@@ -4,6 +4,7 @@ Fetches hawker centre / market closure data from data.gov.sg NEA datasets.
 Datasets used:
 - Dates of Hawker Centres Closure: d_bda4baa634dd1cc7a6c7cad5f19e2d68
 - List of Government Markets & Hawker Centres: d_68a42f09f350881996d83f9cd73ab02f
+- Hawker Centres GeoJSON (locations): d_4a086da0a5553be1d89383cd90d07ecd
 """
 
 import requests
@@ -12,6 +13,7 @@ BASE_URL = "https://data.gov.sg/api/action/datastore_search"
 
 CLOSURE_DATASET_ID = "d_bda4baa634dd1cc7a6c7cad5f19e2d68"
 MARKETS_LIST_DATASET_ID = "d_68a42f09f350881996d83f9cd73ab02f"
+GEOJSON_DATASET_ID = "d_4a086da0a5553be1d89383cd90d07ecd"
 
 # Fallback: initiate-download API (v1) for full CSV download
 DOWNLOAD_INITIATE_URL = (
@@ -76,3 +78,23 @@ def fetch_all_markets():
         if offset >= total:
             break
     return all_records
+
+
+def fetch_hawker_geojson():
+    """Fetch hawker centre locations as GeoJSON from data.gov.sg.
+
+    Uses the poll-download endpoint (GeoJSON datasets skip initiate-download).
+    Returns a GeoJSON FeatureCollection dict.
+    """
+    poll_url = DOWNLOAD_POLL_URL.format(dataset_id=GEOJSON_DATASET_ID)
+    resp = requests.get(poll_url, timeout=30)
+    resp.raise_for_status()
+    poll_data = resp.json()
+
+    if poll_data.get("code") != 0:
+        raise RuntimeError(f"GeoJSON poll failed: {poll_data.get('errMsg', 'unknown error')}")
+
+    download_url = poll_data["data"]["url"]
+    geo_resp = requests.get(download_url, timeout=30)
+    geo_resp.raise_for_status()
+    return geo_resp.json()

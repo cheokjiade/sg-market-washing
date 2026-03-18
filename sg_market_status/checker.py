@@ -4,7 +4,7 @@ closed for washing, cleaning, or renovation works.
 """
 
 from datetime import date, datetime
-from sg_market_status.data_fetcher import fetch_all_closure_data, fetch_all_markets
+from sg_market_status.data_fetcher import fetch_all_closure_data, fetch_all_markets, fetch_hawker_geojson
 
 
 def parse_date(date_str):
@@ -249,3 +249,110 @@ def search_market(query):
             })
 
     return results
+
+
+def get_map_data(target_date=None):
+    """Build map marker data: each hawker centre with lat/lng and colour status.
+
+    Returns a list of dicts:
+        - name, lat, lng
+        - status: 'closed' | 'closing_soon' | 'open'
+        - colour: 'red' | 'yellow' | 'green'
+        - closure_info: string with details (if applicable)
+    """
+    from datetime import timedelta
+
+    if target_date is None:
+        target_date = date.today()
+    elif isinstance(target_date, str):
+        target_date = parse_date(target_date) or date.today()
+
+    week_ahead = target_date + timedelta(days=7)
+
+    # 1. Build a lookup of closure status by centre name (lowered)
+    records = fetch_all_closure_data()
+    closure_lookup = {}  # name_lower -> { status, info }
+
+    for raw_record in records:
+        record = _normalise_record(raw_record)
+        name = _get_field(
+            record,
+            "name_of_centre", "name", "centre_name", "hawker_centre",
+            default="Unknown",
+        )
+        name_lower = name.strip().lower()
+
+        # Gather all closure periods
+        periods = []
+        for prefix in ["cleaning", "q1_cleaning", "q2_cleaning", "q3_cleaning", "q4_cleaning"]:
+            start = parse_date(_get_field(record, f"{prefix}startdate", f"{prefix}_startdate"))
+            end = parse_date(_get_field(record, f"{prefix}enddate", f"{prefix}_enddate"))
+            if start and end:
+                periods.append(("Cleaning/Washing", start, end))
+
+        works_start = parse_date(
+            _get_field(record, "other_works_startdate", "other_works_start_date", "others_startdate")
+        )
+        works_end = parse_date(
+            _get_field(record, "other_works_enddate", "other_works_end_date", "others_enddate")
+        )
+        if works_start and works_end:
+            periods.append(("Renovation/Other Works", works_start, works_end))
+
+        for label, start, end in periods:
+            if start <= target_date <= end:
+                closure_lookup[name_lower] = {
+                    "status": "closed",
+                    "info": f"{label}: {start.isoformat()} to {end.isoformat()}",
+                }
+                break
+            elif target_date < start <= week_ahead:
+                if name_lower not in closure_lookup or closure_lookup[name_lower]["status"] != "closed":
+                    closure_lookup[name_lower] = {
+                        "status": "closing_soon",
+                        "info": f"{label}: {start.isoformat()} to {end.isoformat()}",
+                    }
+
+    # 2. Get GeoJSON features
+    geojson = fetch_hawker_geojson()
+    features = geojson.get("features", [])
+
+    colour_map = {"closed": "red", "closing_soon": "yellow", "open": "green"}
+    markers = []
+
+    for feature in features:
+        props = feature.get("properties", {})
+        geom = feature.get("geometry", {})
+        coords = geom.get("coordinates", [])
+        if not coords or len(coords) < 2:
+            continue
+
+        lng, lat = coords[0], coords[1]
+        name = props.get("NAME", props.get("name", "Unknown"))
+        name_lower = name.strip().lower()
+
+        # Match against closure lookup (fuzzy: try substring matching)
+        matched_status = None
+        for closure_name, info in closure_lookup.items():
+            if closure_name in name_lower or name_lower in closure_name:
+                matched_status = info
+                break
+
+        if matched_status:
+            status = matched_status["status"]
+            closure_info = matched_status["info"]
+        else:
+            status = "open"
+            closure_info = ""
+
+        markers.append({
+            "name": name,
+            "lat": lat,
+            "lng": lng,
+            "status": status,
+            "colour": colour_map[status],
+            "closure_info": closure_info,
+            "address": props.get("ADDRESSSTREETNAME", ""),
+        })
+
+    return markers
