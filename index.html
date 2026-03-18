@@ -181,13 +181,12 @@
 <script>
 // ── Config ──────────────────────────────────────────────────────────
 const CLOSURE_DATASET = 'd_bda4baa634dd1cc7a6c7cad5f19e2d68';
-const GEOJSON_DATASET = 'd_4a086da0a5553be1d89383cd90d07ecd';
 const DS_URL = 'https://data.gov.sg/api/action/datastore_search';
-const POLL_URL = 'https://api-open.data.gov.sg/v1/public/api/datasets/{id}/poll-download';
+const ONEMAP_SEARCH = 'https://www.onemap.gov.sg/api/common/elastic/search';
 
 // ── Data cache ──────────────────────────────────────────────────────
 let closureCache = null;
-let geojsonCache = null;
+let geocodeCache = {};
 
 // ── Date helpers ────────────────────────────────────────────────────
 function today() {
@@ -195,10 +194,12 @@ function today() {
 }
 
 function parseDate(s) {
-    if (!s) return null;
-    // Try YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY
+    if (!s || typeof s !== 'string') return null;
+    s = s.trim();
+    // YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
     let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
     if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+    // DD/MM/YYYY or DD-MM-YYYY
     m = s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);
     if (m) return new Date(+m[3], +m[2] - 1, +m[1]);
     return null;
@@ -207,76 +208,166 @@ function parseDate(s) {
 function toISO(d) { return d.toISOString().slice(0, 10); }
 function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
 
-// ── Fetch closure data (paginated) ──────────────────────────────────
+// ── Fetch closure data (paginated, with JSONP fallback) ─────────────
+function jsonp(url) {
+    return new Promise((resolve, reject) => {
+        const cb = '_cb' + Math.random().toString(36).slice(2);
+        const script = document.createElement('script');
+        window[cb] = function (data) {
+            delete window[cb];
+            document.head.removeChild(script);
+            resolve(data);
+        };
+        script.onerror = function () {
+            delete window[cb];
+            document.head.removeChild(script);
+            reject(new Error('JSONP request failed'));
+        };
+        script.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cb;
+        document.head.appendChild(script);
+    });
+}
+
+async function fetchPage(offset) {
+    const url = `${DS_URL}?resource_id=${CLOSURE_DATASET}&limit=500&offset=${offset}`;
+    // Try fetch first, fall back to JSONP
+    try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+    } catch (e) {
+        console.log('fetch failed, trying JSONP...', e.message);
+        return await jsonp(url);
+    }
+}
+
 async function fetchAllClosures() {
     if (closureCache) return closureCache;
     let all = [], offset = 0, total = Infinity;
     while (offset < total) {
-        const url = `${DS_URL}?resource_id=${CLOSURE_DATASET}&limit=500&offset=${offset}`;
-        const res = await fetch(url);
-        const json = await res.json();
+        const json = await fetchPage(offset);
         const result = json.result || {};
         total = result.total || 0;
-        all = all.concat(result.records || []);
+        const records = result.records || [];
+        all = all.concat(records);
         offset += 500;
+        if (records.length === 0) break;
+    }
+    if (all.length > 0) {
+        console.log('Loaded ' + all.length + ' closure records');
+        console.log('Column names:', Object.keys(all[0]));
+        console.log('Sample record:', JSON.stringify(all[0], null, 2));
+    } else {
+        console.warn('No closure records returned from API');
     }
     closureCache = all;
     return all;
 }
 
-// ── Fetch GeoJSON locations ─────────────────────────────────────────
-async function fetchGeoJSON() {
-    if (geojsonCache) return geojsonCache;
-    const pollUrl = POLL_URL.replace('{id}', GEOJSON_DATASET);
-    const res = await fetch(pollUrl);
-    const json = await res.json();
-    if (json.code !== 0) throw new Error(json.errMsg || 'GeoJSON poll failed');
-    const geoRes = await fetch(json.data.url);
-    geojsonCache = await geoRes.json();
-    return geojsonCache;
-}
+// ── Smart field detection ───────────────────────────────────────────
+// Instead of hardcoding field names, auto-detect from column names.
+let fieldMap = null;
 
-// ── Normalise record keys ───────────────────────────────────────────
-function norm(record) {
-    const out = {};
-    for (const [k, v] of Object.entries(record)) {
-        out[k.trim().toLowerCase().replace(/ /g, '_')] = v;
+function buildFieldMap(record) {
+    if (fieldMap) return;
+    const keys = Object.keys(record).map(k => k.trim().toLowerCase().replace(/\s+/g, '_'));
+    const orig = Object.keys(record);
+    fieldMap = { name: null, cleaning: [], other_works: [], remarks: null };
+
+    for (let i = 0; i < keys.length; i++) {
+        const k = keys[i], o = orig[i];
+        // Name field
+        if (!fieldMap.name && (k.includes('name') || k.includes('centre'))) {
+            if (!k.includes('date') && !k.includes('start') && !k.includes('end')) {
+                fieldMap.name = o;
+            }
+        }
+        // Remarks
+        if (!fieldMap.remarks && k.includes('remark')) {
+            fieldMap.remarks = o;
+        }
+        // Cleaning date pairs
+        if ((k.includes('cleaning') || k.includes('washing')) && k.includes('start')) {
+            const endKey = findEndKey(orig, keys, k, i);
+            if (endKey) fieldMap.cleaning.push({ start: o, end: endKey });
+        }
+        // Other works
+        if ((k.includes('other') || k.includes('works') || k.includes('renovation')) && k.includes('start')) {
+            const endKey = findEndKey(orig, keys, k, i);
+            if (endKey) fieldMap.other_works.push({ start: o, end: endKey });
+        }
     }
-    return out;
+
+    // If no cleaning fields found via 'cleaning', look for q1/q2/q3/q4 patterns
+    if (fieldMap.cleaning.length === 0) {
+        for (let i = 0; i < keys.length; i++) {
+            const k = keys[i], o = orig[i];
+            if (/q\d/.test(k) && k.includes('start')) {
+                const endKey = findEndKey(orig, keys, k, i);
+                if (endKey) fieldMap.cleaning.push({ start: o, end: endKey });
+            }
+        }
+    }
+
+    console.log('Auto-detected field map:', JSON.stringify(fieldMap, null, 2));
 }
 
-function field(rec, ...keys) {
-    for (const k of keys) if (rec[k]) return rec[k];
-    return '';
+function findEndKey(orig, keys, startKeyNorm, startIdx) {
+    // Try to find matching end key by replacing 'start' with 'end'
+    const endPattern = startKeyNorm.replace('start', 'end');
+    for (let j = 0; j < keys.length; j++) {
+        if (keys[j] === endPattern) return orig[j];
+    }
+    // Try nearby keys
+    for (let j = startIdx + 1; j < Math.min(startIdx + 3, keys.length); j++) {
+        if (keys[j].includes('end')) return orig[j];
+    }
+    return null;
 }
 
-function getName(rec) {
-    return field(rec, 'name_of_centre', 'name', 'centre_name', 'hawker_centre') || 'Unknown';
+function getName(record) {
+    if (fieldMap && fieldMap.name) return record[fieldMap.name] || 'Unknown';
+    // Fallback: try common names
+    for (const k of Object.keys(record)) {
+        const kl = k.toLowerCase();
+        if ((kl.includes('name') || kl.includes('centre')) && !kl.includes('date')) {
+            const v = record[k];
+            if (v && typeof v === 'string' && v.length > 2) return v;
+        }
+    }
+    return 'Unknown';
 }
 
-// ── Extract all closure periods from a record ───────────────────────
-function getClosurePeriods(rec) {
+function getClosurePeriods(record) {
     const periods = [];
-    const prefixes = ['cleaning', 'q1_cleaning', 'q2_cleaning', 'q3_cleaning', 'q4_cleaning'];
-    for (const p of prefixes) {
-        const s = parseDate(field(rec, p + 'startdate', p + '_startdate', p + '_start_date'));
-        const e = parseDate(field(rec, p + 'enddate', p + '_enddate', p + '_end_date'));
+    if (!fieldMap) return periods;
+
+    for (const pair of fieldMap.cleaning) {
+        const s = parseDate(record[pair.start]);
+        const e = parseDate(record[pair.end]);
         if (s && e) periods.push({ type: 'cleaning', start: s, end: e });
     }
-    const ws = parseDate(field(rec, 'other_works_startdate', 'other_works_start_date', 'others_startdate'));
-    const we = parseDate(field(rec, 'other_works_enddate', 'other_works_end_date', 'others_enddate'));
-    if (ws && we) periods.push({ type: 'other_works', start: ws, end: we });
+    for (const pair of fieldMap.other_works) {
+        const s = parseDate(record[pair.start]);
+        const e = parseDate(record[pair.end]);
+        if (s && e) periods.push({ type: 'other_works', start: s, end: e });
+    }
     return periods;
+}
+
+function getRemarks(record) {
+    if (fieldMap && fieldMap.remarks) return record[fieldMap.remarks] || '';
+    return '';
 }
 
 // ── Core: get closures on a date ────────────────────────────────────
 async function getClosuresOnDate(targetStr) {
     const target = parseDate(targetStr) || new Date();
     const records = await fetchAllClosures();
+    if (records.length > 0) buildFieldMap(records[0]);
     const results = [];
 
-    for (const raw of records) {
-        const rec = norm(raw);
+    for (const rec of records) {
         const name = getName(rec);
         for (const p of getClosurePeriods(rec)) {
             if (p.start <= target && target <= p.end) {
@@ -285,9 +376,9 @@ async function getClosuresOnDate(targetStr) {
                     closure_type: p.type,
                     start_date: toISO(p.start),
                     end_date: toISO(p.end),
-                    remarks: field(rec, 'remarks', 'remarks_for_other_works'),
+                    remarks: getRemarks(rec),
                 });
-                break; // one match per centre is enough
+                break;
             }
         }
     }
@@ -299,10 +390,10 @@ async function getUpcomingClosures(daysAhead) {
     const target = new Date();
     const end = addDays(target, daysAhead);
     const records = await fetchAllClosures();
+    if (records.length > 0) buildFieldMap(records[0]);
     const results = [];
 
-    for (const raw of records) {
-        const rec = norm(raw);
+    for (const rec of records) {
         const name = getName(rec);
         for (const p of getClosurePeriods(rec)) {
             if (p.start <= end && p.end >= target) {
@@ -311,7 +402,7 @@ async function getUpcomingClosures(daysAhead) {
                     closure_type: p.type,
                     start_date: toISO(p.start),
                     end_date: toISO(p.end),
-                    remarks: field(rec, 'remarks'),
+                    remarks: getRemarks(rec),
                 });
             }
         }
@@ -324,10 +415,10 @@ async function getUpcomingClosures(daysAhead) {
 async function searchMarket(query) {
     const q = query.toLowerCase();
     const records = await fetchAllClosures();
+    if (records.length > 0) buildFieldMap(records[0]);
     const results = [];
 
-    for (const raw of records) {
-        const rec = norm(raw);
+    for (const rec of records) {
         const name = getName(rec);
         if (!name.toLowerCase().includes(q)) continue;
         const closures = getClosurePeriods(rec).map(p => ({
@@ -335,64 +426,83 @@ async function searchMarket(query) {
             start_date: toISO(p.start),
             end_date: toISO(p.end),
         }));
-        results.push({ name, closures, remarks: field(rec, 'remarks') });
+        results.push({ name, closures, remarks: getRemarks(rec) });
     }
     return results;
 }
 
+// ── Geocode via OneMap ──────────────────────────────────────────────
+async function geocode(name) {
+    if (geocodeCache[name]) return geocodeCache[name];
+    try {
+        const url = `${ONEMAP_SEARCH}?searchVal=${encodeURIComponent(name)}&returnGeom=Y&getAddrDetails=Y&pageNum=1`;
+        const res = await fetch(url);
+        const json = await res.json();
+        const results = json.results || [];
+        if (results.length > 0) {
+            const r = results[0];
+            const loc = { lat: parseFloat(r.LATITUDE), lng: parseFloat(r.LONGITUDE), address: r.ADDRESS || '' };
+            geocodeCache[name] = loc;
+            return loc;
+        }
+    } catch (e) {
+        // Ignore geocoding errors for individual centres
+    }
+    return null;
+}
+
 // ── Core: map data ──────────────────────────────────────────────────
-async function getMapData() {
+async function getMapData(progressCallback) {
     const target = new Date();
     const weekAhead = addDays(target, 7);
     const records = await fetchAllClosures();
+    if (records.length > 0) buildFieldMap(records[0]);
 
-    // Build closure lookup by lowercase name
-    const lookup = {};
-    for (const raw of records) {
-        const rec = norm(raw);
-        const name = getName(rec).trim().toLowerCase();
+    // Build list of unique centres with their closure status
+    const centres = {};
+    for (const rec of records) {
+        const name = getName(rec);
+        if (!name || name === 'Unknown') continue;
+        if (!centres[name]) {
+            centres[name] = { name, status: 'open', closure_info: '' };
+        }
         for (const p of getClosurePeriods(rec)) {
             const label = p.type === 'cleaning' ? 'Cleaning/Washing' : 'Renovation/Other Works';
             const info = `${label}: ${toISO(p.start)} to ${toISO(p.end)}`;
             if (p.start <= target && target <= p.end) {
-                lookup[name] = { status: 'closed', info };
+                centres[name] = { name, status: 'closed', closure_info: info };
                 break;
             } else if (target < p.start && p.start <= weekAhead) {
-                if (!lookup[name] || lookup[name].status !== 'closed') {
-                    lookup[name] = { status: 'closing_soon', info };
+                if (centres[name].status !== 'closed') {
+                    centres[name] = { name, status: 'closing_soon', closure_info: info };
                 }
             }
         }
     }
 
-    const geo = await fetchGeoJSON();
-    const colourMap = { closed: 'red', closing_soon: 'yellow', open: 'green' };
+    const names = Object.keys(centres);
     const markers = [];
+    const colourMap = { closed: 'red', closing_soon: 'yellow', open: 'green' };
 
-    for (const feat of (geo.features || [])) {
-        const props = feat.properties || {};
-        const coords = (feat.geometry || {}).coordinates || [];
-        if (coords.length < 2) continue;
-        const lng = coords[0], lat = coords[1];
-        const name = props.NAME || props.name || 'Unknown';
-        const nameLower = name.trim().toLowerCase();
-
-        let matched = null;
-        for (const [cname, info] of Object.entries(lookup)) {
-            if (cname.includes(nameLower) || nameLower.includes(cname)) {
-                matched = info;
-                break;
-            }
+    // Geocode in batches of 5 to avoid hammering OneMap
+    for (let i = 0; i < names.length; i += 5) {
+        const batch = names.slice(i, i + 5);
+        const results = await Promise.all(batch.map(n => geocode(n)));
+        for (let j = 0; j < batch.length; j++) {
+            const loc = results[j];
+            if (!loc) continue;
+            const c = centres[batch[j]];
+            markers.push({
+                name: c.name,
+                lat: loc.lat,
+                lng: loc.lng,
+                status: c.status,
+                colour: colourMap[c.status],
+                closure_info: c.closure_info,
+                address: loc.address,
+            });
         }
-
-        const status = matched ? matched.status : 'open';
-        markers.push({
-            name,
-            lat, lng, status,
-            colour: colourMap[status],
-            closure_info: matched ? matched.info : '',
-            address: props.ADDRESSSTREETNAME || '',
-        });
+        if (progressCallback) progressCallback(Math.min(i + 5, names.length), names.length);
     }
     return markers;
 }
@@ -401,7 +511,7 @@ async function getMapData() {
 function renderClosures(closures, containerId) {
     const el = document.getElementById(containerId);
     if (!closures.length) {
-        el.innerHTML = '<div class="empty">No closures found.</div>';
+        el.innerHTML = '<div class="empty">No closures found for this date.</div>';
         return;
     }
     el.innerHTML = closures.map(c => {
@@ -438,6 +548,7 @@ function renderSearchResults(results, containerId) {
 }
 
 function esc(s) {
+    if (!s) return '';
     const d = document.createElement('div');
     d.textContent = s;
     return d.innerHTML;
@@ -458,24 +569,27 @@ function switchTab(tab, tabEl) {
 // ── Tab actions ─────────────────────────────────────────────────────
 async function showToday() {
     const el = document.getElementById('today-results');
-    el.innerHTML = '<div class="loading">Loading...</div>';
+    el.innerHTML = '<div class="loading">Loading from data.gov.sg...</div>';
     try {
         const closures = await getClosuresOnDate(today());
         renderClosures(closures, 'today-results');
     } catch (e) {
-        el.innerHTML = '<div class="error">Failed to load data. ' + esc(e.message) + '</div>';
+        console.error('showToday error:', e);
+        el.innerHTML = '<div class="error">Failed to load data: ' + esc(e.message) +
+            '<br><small>Check browser console (F12) for details. The data.gov.sg API may not support CORS from this origin.</small></div>';
     }
 }
 
 async function showUpcoming() {
     const el = document.getElementById('upcoming-results');
-    el.innerHTML = '<div class="loading">Loading...</div>';
+    el.innerHTML = '<div class="loading">Loading from data.gov.sg...</div>';
     try {
         const days = parseInt(document.getElementById('upcoming-days').value);
         const closures = await getUpcomingClosures(days);
         renderClosures(closures, 'upcoming-results');
     } catch (e) {
-        el.innerHTML = '<div class="error">Failed to load data. ' + esc(e.message) + '</div>';
+        console.error('showUpcoming error:', e);
+        el.innerHTML = '<div class="error">Failed to load data: ' + esc(e.message) + '</div>';
     }
 }
 
@@ -488,7 +602,8 @@ async function doSearch() {
         const results = await searchMarket(q);
         renderSearchResults(results, 'search-results');
     } catch (e) {
-        el.innerHTML = '<div class="error">Search failed. ' + esc(e.message) + '</div>';
+        console.error('doSearch error:', e);
+        el.innerHTML = '<div class="error">Search failed: ' + esc(e.message) + '</div>';
     }
 }
 
@@ -501,7 +616,8 @@ async function checkDate() {
         const closures = await getClosuresOnDate(d);
         renderClosures(closures, 'date-results');
     } catch (e) {
-        el.innerHTML = '<div class="error">Failed to load data. ' + esc(e.message) + '</div>';
+        console.error('checkDate error:', e);
+        el.innerHTML = '<div class="error">Failed to load data: ' + esc(e.message) + '</div>';
     }
 }
 
@@ -514,6 +630,9 @@ async function showMap() {
         mapInstance.invalidateSize();
         return;
     }
+
+    const mapEl = document.getElementById('map');
+    mapEl.innerHTML = '';
 
     mapInstance = L.map('map').setView([1.3521, 103.8198], 12);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -534,10 +653,27 @@ async function showMap() {
     };
     legend.addTo(mapInstance);
 
+    // Progress indicator
+    const progress = L.control({ position: 'topright' });
+    progress.onAdd = function () {
+        const div = L.DomUtil.create('div', 'legend');
+        div.id = 'map-progress';
+        div.innerHTML = 'Loading markers...';
+        return div;
+    };
+    progress.addTo(mapInstance);
+
     const colourHex = { red: '#d32f2f', yellow: '#f9a825', green: '#388e3c' };
 
     try {
-        const markers = await getMapData();
+        const markers = await getMapData((done, total) => {
+            const el = document.getElementById('map-progress');
+            if (el) el.innerHTML = `Geocoding ${done}/${total}...`;
+        });
+
+        const progressEl = document.getElementById('map-progress');
+        if (progressEl) progressEl.parentNode.removeChild(progressEl);
+
         for (const m of markers) {
             const colour = colourHex[m.colour] || '#388e3c';
             const circle = L.circleMarker([m.lat, m.lng], {
@@ -561,10 +697,11 @@ async function showMap() {
             if (m.closure_info) popup += '<br><em>' + esc(m.closure_info) + '</em>';
             circle.bindPopup(popup);
         }
+        console.log('Map loaded with ' + markers.length + ' markers');
     } catch (e) {
-        document.getElementById('map').innerHTML =
-            '<div class="error" style="padding-top:200px">Failed to load map data. ' + esc(e.message) + '</div>';
-        return;
+        console.error('Map error:', e);
+        const progressEl = document.getElementById('map-progress');
+        if (progressEl) progressEl.innerHTML = 'Failed: ' + esc(e.message);
     }
 
     mapLoaded = true;
