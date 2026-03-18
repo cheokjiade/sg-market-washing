@@ -410,6 +410,9 @@ async function getMapData() {
             colour: colourMap[status], closure_info,
             address: rec.address_myenv || '',
             photourl: getPhoto(rec),
+            food_stalls: rec.no_of_food_stalls || '',
+            market_stalls: rec.no_of_market_stalls || '',
+            google_3d: rec.google_3d_view || '',
         });
     }
     return markers;
@@ -601,7 +604,12 @@ async function showMap() {
                 popup += '<br><span style="color:#388e3c;font-weight:600">OPEN</span>';
             }
             if (m.closure_info) popup += '<br><em>' + esc(m.closure_info) + '</em>';
-            circle.bindPopup(popup);
+            const stalls = [];
+            if (m.food_stalls && m.food_stalls !== 'nil') stalls.push(m.food_stalls + ' food stalls');
+            if (m.market_stalls && m.market_stalls !== 'nil') stalls.push(m.market_stalls + ' market stalls');
+            if (stalls.length) popup += '<br><span style="color:#555;font-size:0.85em">' + esc(stalls.join(' · ')) + '</span>';
+            if (m.google_3d && m.google_3d !== 'nil') popup += '<br><a href="' + esc(m.google_3d) + '" target="_blank" rel="noopener" style="font-size:0.85em">View in Google 3D</a>';
+            circle.bindPopup(popup, { maxWidth: 250 });
         }
         console.log('Map loaded with ' + markers.length + ' markers');
     } catch (e) {
