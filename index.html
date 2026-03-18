@@ -129,6 +129,93 @@
             margin-right: 6px;
             vertical-align: middle;
         }
+        /* Calendar */
+        .cal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: white;
+            padding: 14px 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            margin-bottom: 16px;
+        }
+        .cal-header h2 { font-size: 1.2em; }
+        .cal-nav {
+            background: none;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            padding: 6px 14px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: all 0.2s;
+        }
+        .cal-nav:hover { border-color: #e53935; color: #e53935; }
+        .cal-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 4px;
+            background: white;
+            padding: 16px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .cal-dow {
+            text-align: center;
+            font-size: 0.8em;
+            font-weight: 600;
+            color: #999;
+            padding: 6px 0;
+        }
+        .cal-day {
+            min-height: 80px;
+            border: 1px solid #eee;
+            border-radius: 8px;
+            padding: 4px;
+            font-size: 0.85em;
+            cursor: pointer;
+            transition: background 0.15s;
+            overflow: hidden;
+        }
+        .cal-day:hover { background: #fafafa; }
+        .cal-day.today { border-color: #e53935; border-width: 2px; }
+        .cal-day.selected { background: #fce4ec; }
+        .cal-day.other-month { opacity: 0.35; }
+        .cal-day-num { font-weight: 600; margin-bottom: 2px; padding: 2px 4px; }
+        .cal-event {
+            display: block;
+            padding: 1px 5px;
+            border-radius: 4px;
+            font-size: 0.72em;
+            margin-bottom: 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: white;
+            line-height: 1.5;
+        }
+        .cal-event.cleaning { background: #fb8c00; }
+        .cal-event.other_works { background: #7b1fa2; }
+        .cal-more {
+            font-size: 0.7em;
+            color: #999;
+            padding: 0 4px;
+        }
+        .cal-detail {
+            margin-top: 16px;
+        }
+        .cal-detail-header {
+            background: white;
+            padding: 14px 20px;
+            border-radius: 12px 12px 0 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            font-weight: 600;
+            border-bottom: 2px solid #e53935;
+        }
+        @media (max-width: 600px) {
+            .cal-day { min-height: 50px; }
+            .cal-event { font-size: 0.6em; padding: 1px 3px; }
+        }
     </style>
 </head>
 <body>
@@ -142,7 +229,7 @@
             <div class="tab active" onclick="switchTab('today', this)">Closed Today</div>
             <div class="tab" onclick="switchTab('upcoming', this)">Upcoming Closures</div>
             <div class="tab" onclick="switchTab('search', this)">Search Market</div>
-            <div class="tab" onclick="switchTab('date', this)">Check Date</div>
+            <div class="tab" onclick="switchTab('date', this)">Calendar</div>
             <div class="tab" onclick="switchTab('map', this)">Map View</div>
         </div>
 
@@ -174,11 +261,13 @@
         </div>
 
         <div id="panel-date" class="panel" style="display:none">
-            <div class="search-box">
-                <input type="date" id="date-input">
-                <button onclick="checkDate()">Check</button>
+            <div class="cal-header">
+                <button class="cal-nav" onclick="calNav(-1)">&larr; Prev</button>
+                <h2 id="cal-title"></h2>
+                <button class="cal-nav" onclick="calNav(1)">Next &rarr;</button>
             </div>
-            <div id="date-results"></div>
+            <div id="cal-grid" class="cal-grid"></div>
+            <div class="cal-detail" id="cal-detail"></div>
         </div>
 
         <div id="panel-map" class="panel" style="display:none">
@@ -486,6 +575,7 @@ function switchTab(tab, tabEl) {
 
     if (tab === 'today') showToday();
     if (tab === 'upcoming') showUpcoming();
+    if (tab === 'date') renderCalendar();
     if (tab === 'map') showMap();
 }
 
@@ -530,18 +620,162 @@ async function doSearch() {
     }
 }
 
-async function checkDate() {
-    const d = document.getElementById('date-input').value;
-    if (!d) return;
-    const el = document.getElementById('date-results');
-    el.innerHTML = '<div class="loading">Loading...</div>';
-    try {
-        const closures = await getClosuresOnDate(d);
-        renderClosures(closures, 'date-results');
-    } catch (e) {
-        console.error('checkDate error:', e);
-        el.innerHTML = '<div class="error">Failed to load data: ' + esc(e.message) + '</div>';
+// ── Calendar ─────────────────────────────────────────────────────────
+let calYear, calMonth; // 0-indexed month
+let calClosureData = null; // cached: Map<"YYYY-MM-DD", [{name, type, start, end, remarks, photourl}]>
+
+function calInit() {
+    const now = new Date();
+    calYear = now.getFullYear();
+    calMonth = now.getMonth();
+}
+calInit();
+
+function calNav(dir) {
+    calMonth += dir;
+    if (calMonth > 11) { calMonth = 0; calYear++; }
+    if (calMonth < 0) { calMonth = 11; calYear--; }
+    renderCalendar();
+}
+
+async function buildCalClosureData() {
+    if (calClosureData) return calClosureData;
+    const records = await fetchAllClosures();
+    const map = new Map();
+
+    for (const rec of records) {
+        const name = getName(rec);
+        const photourl = getPhoto(rec);
+        for (const p of getClosurePeriods(rec)) {
+            // Iterate each day in the closure range
+            const d = new Date(p.start);
+            while (d <= p.end) {
+                const key = toISO(d);
+                if (!map.has(key)) map.set(key, []);
+                map.get(key).push({
+                    name, type: p.type,
+                    start_date: toISO(p.start), end_date: toISO(p.end),
+                    remarks: p.remarks, photourl,
+                });
+                d.setDate(d.getDate() + 1);
+            }
+        }
     }
+    calClosureData = map;
+    return map;
+}
+
+async function renderCalendar() {
+    const titleEl = document.getElementById('cal-title');
+    const gridEl = document.getElementById('cal-grid');
+    const detailEl = document.getElementById('cal-detail');
+    const monthNames = ['January','February','March','April','May','June',
+                        'July','August','September','October','November','December'];
+    titleEl.textContent = monthNames[calMonth] + ' ' + calYear;
+    gridEl.innerHTML = '<div class="loading" style="grid-column:1/-1">Loading closures...</div>';
+    detailEl.innerHTML = '';
+
+    const data = await buildCalClosureData();
+
+    const todayStr = today();
+    const firstDay = new Date(calYear, calMonth, 1);
+    const startDow = firstDay.getDay(); // 0=Sun
+    const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+
+    // Build grid
+    let html = '';
+    const dows = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    for (const d of dows) html += `<div class="cal-dow">${d}</div>`;
+
+    // Previous month fill
+    const prevMonthDays = new Date(calYear, calMonth, 0).getDate();
+    for (let i = startDow - 1; i >= 0; i--) {
+        const day = prevMonthDays - i;
+        const dt = new Date(calYear, calMonth - 1, day);
+        const key = toISO(dt);
+        html += buildCalDay(day, key, data, todayStr, true);
+    }
+
+    // Current month
+    for (let d = 1; d <= daysInMonth; d++) {
+        const key = `${calYear}-${String(calMonth+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+        html += buildCalDay(d, key, data, todayStr, false);
+    }
+
+    // Next month fill (complete the last row)
+    const totalCells = startDow + daysInMonth;
+    const remainder = totalCells % 7;
+    if (remainder > 0) {
+        for (let d = 1; d <= 7 - remainder; d++) {
+            const dt = new Date(calYear, calMonth + 1, d);
+            const key = toISO(dt);
+            html += buildCalDay(d, key, data, todayStr, true);
+        }
+    }
+
+    gridEl.innerHTML = html;
+}
+
+function buildCalDay(dayNum, dateKey, data, todayStr, isOtherMonth) {
+    const events = data.get(dateKey) || [];
+    const classes = ['cal-day'];
+    if (dateKey === todayStr) classes.push('today');
+    if (isOtherMonth) classes.push('other-month');
+
+    const maxShow = 2;
+    let evHtml = '';
+    for (let i = 0; i < Math.min(events.length, maxShow); i++) {
+        const e = events[i];
+        evHtml += `<span class="cal-event ${e.type}">${esc(e.name)}</span>`;
+    }
+    if (events.length > maxShow) {
+        evHtml += `<span class="cal-more">+${events.length - maxShow} more</span>`;
+    }
+
+    return `<div class="${classes.join(' ')}" onclick="calSelectDay('${dateKey}')">
+        <div class="cal-day-num">${dayNum}</div>
+        ${evHtml}
+    </div>`;
+}
+
+async function calSelectDay(dateKey) {
+    // Highlight selected day
+    document.querySelectorAll('.cal-day').forEach(el => el.classList.remove('selected'));
+    const allDays = document.querySelectorAll('.cal-day');
+    for (const el of allDays) {
+        if (el.onclick && el.getAttribute('onclick')?.includes(dateKey)) {
+            el.classList.add('selected');
+        }
+    }
+
+    const data = await buildCalClosureData();
+    const events = data.get(dateKey) || [];
+    const detailEl = document.getElementById('cal-detail');
+
+    const d = parseDate(dateKey);
+    const dateLabel = d ? d.toLocaleDateString('en-SG', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : dateKey;
+
+    if (!events.length) {
+        detailEl.innerHTML = `<div class="cal-detail-header">${esc(dateLabel)}</div>
+            <div class="empty">No closures on this date.</div>`;
+        return;
+    }
+
+    // Deduplicate (same market may appear if multiple closure periods overlap, but shouldn't on same day)
+    const closures = events.map(e => ({
+        name: e.name,
+        closure_type: e.type,
+        start_date: e.start_date,
+        end_date: e.end_date,
+        remarks: e.remarks,
+        photourl: e.photourl,
+    }));
+
+    detailEl.innerHTML = `<div class="cal-detail-header">${esc(dateLabel)} &mdash; ${closures.length} closure${closures.length > 1 ? 's' : ''}</div>`;
+    // Reuse the existing renderClosures into a temp container
+    const tempId = 'cal-detail-list';
+    detailEl.innerHTML += `<div id="${tempId}"></div>`;
+    renderClosures(closures, tempId);
 }
 
 // ── Map ─────────────────────────────────────────────────────────────
@@ -620,7 +854,6 @@ async function showMap() {
 }
 
 // ── Init ────────────────────────────────────────────────────────────
-document.getElementById('date-input').value = today();
 showToday();
 </script>
 </body>
