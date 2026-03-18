@@ -319,9 +319,8 @@
 
         <div id="panel-search" class="panel" style="display:none">
             <div class="search-box">
-                <input type="text" id="search-input" placeholder="Enter market or hawker centre name..."
-                       onkeydown="if(event.key==='Enter') doSearch()">
-                <button onclick="doSearch()">Search</button>
+                <input type="text" id="search-input" placeholder="Start typing a market or hawker centre name..."
+                       oninput="debouncedSearch()">
             </div>
             <div id="search-results"></div>
         </div>
@@ -672,10 +671,17 @@ async function showUpcoming() {
     }
 }
 
+let searchTimer = null;
+function debouncedSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(doSearch, 250);
+}
+
 async function doSearch() {
     const q = document.getElementById('search-input').value.trim();
-    if (!q) return;
     const el = document.getElementById('search-results');
+    if (!q) { el.innerHTML = ''; return; }
+    if (q.length < 2) return;
     el.innerHTML = '<div class="loading">Searching...</div>';
     try {
         const results = await searchMarket(q);
