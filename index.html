@@ -90,6 +90,35 @@
         }
         .card-body { flex: 1; min-width: 0; }
         .card h3 { font-size: 1.1em; margin-bottom: 8px; }
+        .card-title-row {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .card-title-row h3 { flex: 1; min-width: 0; }
+        .fav-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 1.2em;
+            padding: 0;
+            line-height: 1;
+            color: #ccc;
+            flex-shrink: 0;
+            transition: color 0.15s, transform 0.15s;
+        }
+        .fav-btn:hover { transform: scale(1.2); }
+        .fav-btn.active { color: #e53935; }
+        .fav-count {
+            background: #e53935;
+            color: white;
+            font-size: 0.65em;
+            padding: 1px 5px;
+            border-radius: 10px;
+            margin-left: 4px;
+            vertical-align: middle;
+        }
         .badge {
             display: inline-block;
             padding: 3px 10px;
@@ -364,6 +393,7 @@
             <div class="tab" onclick="switchTab('search', this)">Search Market</div>
             <div class="tab" onclick="switchTab('date', this)">Calendar</div>
             <div class="tab" onclick="switchTab('map', this)">Map View</div>
+            <div class="tab" id="fav-tab" onclick="switchTab('fav', this)">Favourites</div>
         </div>
 
         <div id="panel-today" class="panel">
@@ -404,6 +434,10 @@
 
         <div id="panel-map" class="panel" style="display:none">
             <div id="map"></div>
+        </div>
+
+        <div id="panel-fav" class="panel" style="display:none">
+            <div id="fav-results"></div>
         </div>
 
         <footer>
@@ -639,6 +673,113 @@ async function getMapData() {
     return markers;
 }
 
+// ── Favourites (localStorage) ────────────────────────────────────────
+const FAV_KEY = 'sg_market_favourites';
+
+function getFavourites() {
+    try {
+        return JSON.parse(localStorage.getItem(FAV_KEY)) || [];
+    } catch { return []; }
+}
+
+function saveFavourites(favs) {
+    localStorage.setItem(FAV_KEY, JSON.stringify(favs));
+    updateFavBadge();
+}
+
+function isFav(name) {
+    return getFavourites().includes(name);
+}
+
+function toggleFav(name) {
+    const favs = getFavourites();
+    const idx = favs.indexOf(name);
+    if (idx >= 0) favs.splice(idx, 1);
+    else favs.push(name);
+    saveFavourites(favs);
+    // Update all star buttons with this name
+    document.querySelectorAll(`.fav-btn[data-name]`).forEach(btn => {
+        if (btn.dataset.name === name) {
+            btn.classList.toggle('active', favs.includes(name));
+            btn.textContent = favs.includes(name) ? '\u2605' : '\u2606';
+        }
+    });
+}
+
+function updateFavBadge() {
+    const tab = document.getElementById('fav-tab');
+    const count = getFavourites().length;
+    tab.innerHTML = 'Favourites' + (count ? `<span class="fav-count">${count}</span>` : '');
+}
+
+function favBtnHtml(name) {
+    const fav = isFav(name);
+    return `<button class="fav-btn ${fav ? 'active' : ''}" data-name="${esc(name)}" `
+        + `onclick="event.stopPropagation();toggleFav('${esc(name).replace(/'/g, "\\'")}')" `
+        + `title="${fav ? 'Remove from' : 'Add to'} favourites">${fav ? '\u2605' : '\u2606'}</button>`;
+}
+
+async function showFavourites() {
+    const el = document.getElementById('fav-results');
+    const favs = getFavourites();
+    if (!favs.length) {
+        el.innerHTML = '<div class="empty">No favourites yet. Tap the star on any market to add it here.</div>';
+        return;
+    }
+    el.innerHTML = '<div class="loading">Loading...</div>';
+    const records = await fetchAllClosures();
+    const todayDate = new Date();
+    const results = [];
+
+    for (const rec of records) {
+        const name = getName(rec);
+        if (!favs.includes(name)) continue;
+        const closures = getClosurePeriods(rec).map(p => ({
+            type: p.type,
+            start_date: toISO(p.start),
+            end_date: toISO(p.end),
+        }));
+        // Determine current status
+        let status = 'open';
+        for (const p of getClosurePeriods(rec)) {
+            if (p.start <= todayDate && todayDate <= p.end) { status = 'closed'; break; }
+        }
+        results.push({ name, closures, remarks: rec.remarks_other_works || '', photourl: getPhoto(rec), status });
+    }
+
+    if (!results.length) {
+        el.innerHTML = '<div class="empty">Your favourited markets were not found in the data.</div>';
+        return;
+    }
+
+    el.innerHTML = results.map(r => {
+        const closureHtml = r.closures.length
+            ? r.closures.map(c => {
+                const label = c.type === 'cleaning' ? 'Cleaning / Washing' : 'Renovation / Other Works';
+                return `<div style="margin-top:6px"><span class="badge ${c.type}">${label}</span>
+                        <span class="date-range">${c.start_date} to ${c.end_date}</span></div>`;
+            }).join('')
+            : '<div style="margin-top:6px;color:#388e3c;font-weight:600">No scheduled closures</div>';
+        const photo = r.photourl
+            ? `<img class="card-photo" src="${esc(r.photourl)}" alt="${esc(r.name)}" loading="lazy" onerror="this.style.display='none'">`
+            : '';
+        const statusHtml = r.status === 'closed'
+            ? '<span style="color:#d32f2f;font-weight:600;font-size:0.85em"> — CLOSED NOW</span>'
+            : '';
+        return `<div class="card">
+            ${photo}
+            <div class="card-body">
+                <div class="card-title-row">
+                    <h3>${esc(r.name)}${statusHtml}</h3>
+                    ${favBtnHtml(r.name)}
+                </div>
+                ${r.remarks ? '<div class="remarks">' + esc(r.remarks) + '</div>' : ''}
+                ${closureHtml}
+            </div>
+        </div>`;
+    }).join('');
+}
+
 // ── UI rendering ────────────────────────────────────────────────────
 function renderClosures(closures, containerId) {
     const el = document.getElementById(containerId);
@@ -654,7 +795,10 @@ function renderClosures(closures, containerId) {
         return `<div class="card ${c.closure_type}">
             ${photo}
             <div class="card-body">
-                <h3>${esc(c.name)}</h3>
+                <div class="card-title-row">
+                    <h3>${esc(c.name)}</h3>
+                    ${favBtnHtml(c.name)}
+                </div>
                 <span class="badge ${c.closure_type}">${typeLabel}</span>
                 <div class="date-range">${c.start_date} to ${c.end_date}</div>
                 ${c.remarks ? '<div class="remarks">' + esc(c.remarks) + '</div>' : ''}
@@ -683,7 +827,10 @@ function renderSearchResults(results, containerId) {
         return `<div class="card">
             ${photo}
             <div class="card-body">
-                <h3>${esc(r.name)}</h3>
+                <div class="card-title-row">
+                    <h3>${esc(r.name)}</h3>
+                    ${favBtnHtml(r.name)}
+                </div>
                 ${r.remarks ? '<div class="remarks">' + esc(r.remarks) + '</div>' : ''}
                 ${closureHtml}
             </div>
@@ -709,6 +856,7 @@ function switchTab(tab, tabEl) {
     if (tab === 'upcoming') showUpcoming();
     if (tab === 'date') renderCalendar();
     if (tab === 'map') showMap();
+    if (tab === 'fav') showFavourites();
 }
 
 // ── Tab actions ─────────────────────────────────────────────────────
@@ -743,7 +891,10 @@ async function showToday() {
                     return `<div class="card ${c.closure_type}">
                         ${photo}
                         <div class="card-body">
-                            <h3>${esc(c.name)}</h3>
+                            <div class="card-title-row">
+                                <h3>${esc(c.name)}</h3>
+                                ${favBtnHtml(c.name)}
+                            </div>
                             <span class="badge ${c.closure_type}">${typeLabel}</span>
                             <div class="date-range">${c.start_date} to ${c.end_date}</div>
                             ${c.remarks ? '<div class="remarks">' + esc(c.remarks) + '</div>' : ''}
@@ -1139,6 +1290,7 @@ async function showMap() {
 }
 
 // ── Init ────────────────────────────────────────────────────────────
+updateFavBadge();
 showToday();
 </script>
 </body>
