@@ -23,7 +23,9 @@ jobs:
           DATASET="d_bda4baa634dd1cc7a6c7cad5f19e2d68"
           LIMIT=500
           OFFSET=0
-          ALL_RECORDS="[]"
+
+          # Use temp files instead of shell variables to avoid "Argument list too long"
+          echo '[]' > /tmp/all_records.json
 
           while true; do
             echo "Fetching offset=$OFFSET..."
@@ -50,28 +52,29 @@ jobs:
               exit 1
             fi
 
-            RESPONSE=$(cat /tmp/api_response.json)
-
             # Validate JSON
-            if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
+            if ! jq empty /tmp/api_response.json 2>/dev/null; then
               echo "ERROR: Invalid JSON response"
-              echo "Response (first 500 chars): $(echo "$RESPONSE" | head -c 500)"
+              head -c 500 /tmp/api_response.json
               exit 1
             fi
 
-            RECORDS=$(echo "$RESPONSE" | jq '.result.records // []')
-            COUNT=$(echo "$RECORDS" | jq 'length')
-            TOTAL=$(echo "$RESPONSE" | jq '.result.total // 0')
+            # Extract records to a temp file
+            jq '.result.records // []' /tmp/api_response.json > /tmp/page_records.json
+            COUNT=$(jq 'length' /tmp/page_records.json)
+            TOTAL=$(jq '.result.total // 0' /tmp/api_response.json)
 
             echo "  Got $COUNT records (total: $TOTAL)"
 
             if [ "$COUNT" -eq 0 ] && [ "$OFFSET" -eq 0 ]; then
               echo "ERROR: API returned 0 records on first page"
-              echo "Full response: $(echo "$RESPONSE" | head -c 1000)"
+              head -c 1000 /tmp/api_response.json
               exit 1
             fi
 
-            ALL_RECORDS=$(echo "$ALL_RECORDS $RECORDS" | jq -s '.[0] + .[1]')
+            # Merge records using files, not shell variables
+            jq -s '.[0] + .[1]' /tmp/all_records.json /tmp/page_records.json > /tmp/merged.json
+            mv /tmp/merged.json /tmp/all_records.json
 
             OFFSET=$((OFFSET + LIMIT))
             if [ "$COUNT" -eq 0 ] || [ "$OFFSET" -ge "$TOTAL" ]; then
@@ -79,7 +82,7 @@ jobs:
             fi
           done
 
-          FINAL_COUNT=$(echo "$ALL_RECORDS" | jq 'length')
+          FINAL_COUNT=$(jq 'length' /tmp/all_records.json)
           echo "Total records fetched: $FINAL_COUNT"
 
           if [ "$FINAL_COUNT" -eq 0 ]; then
@@ -91,11 +94,11 @@ jobs:
           jq -n \
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --argjson total "$FINAL_COUNT" \
-            --argjson records "$ALL_RECORDS" \
+            --slurpfile records /tmp/all_records.json \
             '{
               fetched_at: $ts,
               total: $total,
-              records: $records
+              records: $records[0]
             }' > data/closures.json
 
           FILE_SIZE=$(wc -c < data/closures.json)
