@@ -1,0 +1,87 @@
+name: Fetch NEA Market Data
+
+on:
+  schedule:
+    # Runs daily at 6:00 AM SGT (10:00 PM UTC previous day)
+    - cron: '0 22 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch closure data from data.gov.sg
+        run: |
+          echo "Fetching NEA hawker centre closure data..."
+
+          API_URL="https://data.gov.sg/api/action/datastore_search"
+          DATASET="d_bda4baa634dd1cc7a6c7cad5f19e2d68"
+          LIMIT=500
+          OFFSET=0
+          ALL_RECORDS="[]"
+
+          while true; do
+            echo "Fetching offset=$OFFSET..."
+            RESPONSE=$(curl -sf "${API_URL}?resource_id=${DATASET}&limit=${LIMIT}&offset=${OFFSET}")
+
+            if [ $? -ne 0 ]; then
+              echo "API request failed at offset=$OFFSET"
+              exit 1
+            fi
+
+            RECORDS=$(echo "$RESPONSE" | jq '.result.records')
+            COUNT=$(echo "$RECORDS" | jq 'length')
+            TOTAL=$(echo "$RESPONSE" | jq '.result.total')
+
+            echo "  Got $COUNT records (total: $TOTAL)"
+
+            ALL_RECORDS=$(echo "$ALL_RECORDS $RECORDS" | jq -s '.[0] + .[1]')
+
+            OFFSET=$((OFFSET + LIMIT))
+            if [ "$COUNT" -eq 0 ] || [ "$OFFSET" -ge "$TOTAL" ]; then
+              break
+            fi
+          done
+
+          FINAL_COUNT=$(echo "$ALL_RECORDS" | jq 'length')
+          echo "Total records fetched: $FINAL_COUNT"
+
+          # Build the cached file with metadata
+          jq -n \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson total "$FINAL_COUNT" \
+            --argjson records "$ALL_RECORDS" \
+            '{
+              fetched_at: $ts,
+              total: $total,
+              records: $records
+            }' > data/closures.json
+
+          echo "Saved to data/closures.json ($(wc -c < data/closures.json) bytes)"
+
+      - name: Check for changes
+        id: changes
+        run: |
+          git diff --quiet data/closures.json && echo "changed=false" >> "$GITHUB_OUTPUT" || echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/closures.json
+
+          # Count what changed
+          ADDED=$(git diff --cached --numstat data/closures.json | awk '{print $1}')
+          REMOVED=$(git diff --cached --numstat data/closures.json | awk '{print $2}')
+
+          DATE=$(date -u +%Y-%m-%d)
+          git commit -m "data: update closure data ($DATE)
+
+          +$ADDED -$REMOVED lines changed"
+          git push

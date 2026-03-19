@@ -508,6 +508,24 @@ async function fetchPage(offset) {
 
 async function fetchAllClosures() {
     if (closureCache) return closureCache;
+
+    // Try cached data first (from GitHub Actions daily fetch)
+    try {
+        const cached = await fetch('data/closures.json');
+        if (cached.ok) {
+            const json = await cached.json();
+            if (json.records && json.records.length > 0) {
+                console.log('Loaded ' + json.records.length + ' records from cache (fetched: ' + json.fetched_at + ')');
+                console.log('Column names:', Object.keys(json.records[0]));
+                closureCache = json.records;
+                return closureCache;
+            }
+        }
+    } catch (e) {
+        console.log('Cache not available, falling back to live API...', e.message);
+    }
+
+    // Fallback: fetch directly from data.gov.sg API
     let all = [], offset = 0, total = Infinity;
     while (offset < total) {
         const json = await fetchPage(offset);
@@ -519,7 +537,7 @@ async function fetchAllClosures() {
         if (records.length === 0) break;
     }
     if (all.length > 0) {
-        console.log('Loaded ' + all.length + ' closure records');
+        console.log('Loaded ' + all.length + ' closure records from live API');
         console.log('Column names:', Object.keys(all[0]));
     }
     closureCache = all;
