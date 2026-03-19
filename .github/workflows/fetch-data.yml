@@ -17,7 +17,6 @@ jobs:
 
       - name: Fetch closure data from data.gov.sg
         run: |
-          set -e
           echo "Fetching NEA hawker centre closure data..."
 
           API_URL="https://data.gov.sg/api/action/datastore_search"
@@ -26,51 +25,37 @@ jobs:
           OFFSET=0
           ALL_RECORDS="[]"
 
-          # Retry helper: retry up to 3 times with backoff
-          fetch_with_retry() {
-            local url="$1"
-            local attempt=1
-            local max_attempts=3
-            while [ $attempt -le $max_attempts ]; do
-              echo "  Attempt $attempt of $max_attempts..."
-              HTTP_CODE=$(curl -s -o /tmp/api_response.json -w "%{http_code}" "$url")
-              if [ "$HTTP_CODE" -eq 200 ]; then
-                cat /tmp/api_response.json
-                return 0
-              fi
-              echo "  HTTP $HTTP_CODE - retrying in $((attempt * 5))s..."
-              echo "  Response body: $(head -c 500 /tmp/api_response.json)"
-              sleep $((attempt * 5))
-              attempt=$((attempt + 1))
-            done
-            echo "ERROR: Failed after $max_attempts attempts (last HTTP $HTTP_CODE)"
-            echo "Response: $(head -c 1000 /tmp/api_response.json)"
-            return 1
-          }
-
           while true; do
             echo "Fetching offset=$OFFSET..."
             URL="${API_URL}?resource_id=${DATASET}&limit=${LIMIT}&offset=${OFFSET}"
-            echo "  URL: $URL"
 
-            RESPONSE=$(fetch_with_retry "$URL")
-            if [ $? -ne 0 ]; then
-              echo "API request failed at offset=$OFFSET"
+            # Retry up to 3 times with backoff
+            SUCCESS=false
+            for ATTEMPT in 1 2 3; do
+              echo "  Attempt $ATTEMPT..."
+              HTTP_CODE=$(curl -s -o /tmp/api_response.json -w "%{http_code}" --max-time 30 "$URL") || true
+
+              if [ "$HTTP_CODE" = "200" ]; then
+                SUCCESS=true
+                break
+              fi
+              echo "  HTTP $HTTP_CODE - response: $(head -c 300 /tmp/api_response.json 2>/dev/null)"
+              WAIT=$((ATTEMPT * 5))
+              echo "  Retrying in ${WAIT}s..."
+              sleep $WAIT
+            done
+
+            if [ "$SUCCESS" != "true" ]; then
+              echo "ERROR: Failed to fetch offset=$OFFSET after 3 attempts"
               exit 1
             fi
+
+            RESPONSE=$(cat /tmp/api_response.json)
 
             # Validate JSON
             if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
               echo "ERROR: Invalid JSON response"
               echo "Response (first 500 chars): $(echo "$RESPONSE" | head -c 500)"
-              exit 1
-            fi
-
-            # Check for API-level errors
-            SUCCESS=$(echo "$RESPONSE" | jq -r '.success // empty')
-            if [ "$SUCCESS" = "false" ]; then
-              echo "ERROR: API returned success=false"
-              echo "$RESPONSE" | jq '.error // .message // .'
               exit 1
             fi
 
@@ -81,7 +66,8 @@ jobs:
             echo "  Got $COUNT records (total: $TOTAL)"
 
             if [ "$COUNT" -eq 0 ] && [ "$OFFSET" -eq 0 ]; then
-              echo "ERROR: API returned 0 records on first page - data may be unavailable"
+              echo "ERROR: API returned 0 records on first page"
+              echo "Full response: $(echo "$RESPONSE" | head -c 1000)"
               exit 1
             fi
 
@@ -97,11 +83,10 @@ jobs:
           echo "Total records fetched: $FINAL_COUNT"
 
           if [ "$FINAL_COUNT" -eq 0 ]; then
-            echo "ERROR: No records fetched, not updating cache"
+            echo "ERROR: No records fetched"
             exit 1
           fi
 
-          # Build the cached file with metadata
           mkdir -p data
           jq -n \
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
