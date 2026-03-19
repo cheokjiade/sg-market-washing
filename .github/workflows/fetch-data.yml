@@ -17,6 +17,7 @@ jobs:
 
       - name: Fetch closure data from data.gov.sg
         run: |
+          set -e
           echo "Fetching NEA hawker centre closure data..."
 
           API_URL="https://data.gov.sg/api/action/datastore_search"
@@ -25,20 +26,64 @@ jobs:
           OFFSET=0
           ALL_RECORDS="[]"
 
+          # Retry helper: retry up to 3 times with backoff
+          fetch_with_retry() {
+            local url="$1"
+            local attempt=1
+            local max_attempts=3
+            while [ $attempt -le $max_attempts ]; do
+              echo "  Attempt $attempt of $max_attempts..."
+              HTTP_CODE=$(curl -s -o /tmp/api_response.json -w "%{http_code}" "$url")
+              if [ "$HTTP_CODE" -eq 200 ]; then
+                cat /tmp/api_response.json
+                return 0
+              fi
+              echo "  HTTP $HTTP_CODE - retrying in $((attempt * 5))s..."
+              echo "  Response body: $(head -c 500 /tmp/api_response.json)"
+              sleep $((attempt * 5))
+              attempt=$((attempt + 1))
+            done
+            echo "ERROR: Failed after $max_attempts attempts (last HTTP $HTTP_CODE)"
+            echo "Response: $(head -c 1000 /tmp/api_response.json)"
+            return 1
+          }
+
           while true; do
             echo "Fetching offset=$OFFSET..."
-            RESPONSE=$(curl -sf "${API_URL}?resource_id=${DATASET}&limit=${LIMIT}&offset=${OFFSET}")
+            URL="${API_URL}?resource_id=${DATASET}&limit=${LIMIT}&offset=${OFFSET}"
+            echo "  URL: $URL"
 
+            RESPONSE=$(fetch_with_retry "$URL")
             if [ $? -ne 0 ]; then
               echo "API request failed at offset=$OFFSET"
               exit 1
             fi
 
-            RECORDS=$(echo "$RESPONSE" | jq '.result.records')
+            # Validate JSON
+            if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
+              echo "ERROR: Invalid JSON response"
+              echo "Response (first 500 chars): $(echo "$RESPONSE" | head -c 500)"
+              exit 1
+            fi
+
+            # Check for API-level errors
+            SUCCESS=$(echo "$RESPONSE" | jq -r '.success // empty')
+            if [ "$SUCCESS" = "false" ]; then
+              echo "ERROR: API returned success=false"
+              echo "$RESPONSE" | jq '.error // .message // .'
+              exit 1
+            fi
+
+            RECORDS=$(echo "$RESPONSE" | jq '.result.records // []')
             COUNT=$(echo "$RECORDS" | jq 'length')
-            TOTAL=$(echo "$RESPONSE" | jq '.result.total')
+            TOTAL=$(echo "$RESPONSE" | jq '.result.total // 0')
 
             echo "  Got $COUNT records (total: $TOTAL)"
+
+            if [ "$COUNT" -eq 0 ] && [ "$OFFSET" -eq 0 ]; then
+              echo "ERROR: API returned 0 records on first page - data may be unavailable"
+              exit 1
+            fi
 
             ALL_RECORDS=$(echo "$ALL_RECORDS $RECORDS" | jq -s '.[0] + .[1]')
 
@@ -51,7 +96,13 @@ jobs:
           FINAL_COUNT=$(echo "$ALL_RECORDS" | jq 'length')
           echo "Total records fetched: $FINAL_COUNT"
 
+          if [ "$FINAL_COUNT" -eq 0 ]; then
+            echo "ERROR: No records fetched, not updating cache"
+            exit 1
+          fi
+
           # Build the cached file with metadata
+          mkdir -p data
           jq -n \
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --argjson total "$FINAL_COUNT" \
@@ -62,7 +113,8 @@ jobs:
               records: $records
             }' > data/closures.json
 
-          echo "Saved to data/closures.json ($(wc -c < data/closures.json) bytes)"
+          FILE_SIZE=$(wc -c < data/closures.json)
+          echo "Saved to data/closures.json ($FILE_SIZE bytes, $FINAL_COUNT records)"
 
       - name: Check for changes
         id: changes
@@ -76,12 +128,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/closures.json
 
-          # Count what changed
-          ADDED=$(git diff --cached --numstat data/closures.json | awk '{print $1}')
-          REMOVED=$(git diff --cached --numstat data/closures.json | awk '{print $2}')
-
+          RECORD_COUNT=$(jq '.total' data/closures.json)
           DATE=$(date -u +%Y-%m-%d)
-          git commit -m "data: update closure data ($DATE)
-
-          +$ADDED -$REMOVED lines changed"
+          git commit -m "data: update closure data ($DATE, $RECORD_COUNT records)"
           git push
