@@ -88,7 +88,7 @@
             flex-shrink: 0;
             background: #eee;
         }
-        .card-body { flex: 1; min-width: 0; }
+        .card-body { flex: 1; min-width: 0; text-align: left; }
         .card h3 { font-size: 1.1em; margin-bottom: 8px; }
         .card-title-row {
             display: flex;
@@ -569,16 +569,21 @@ function getName(rec) {
     return rec.name || rec.Name || rec.name_of_centre || 'Unknown';
 }
 
+function cleanRemarks(s) {
+    if (!s || s === 'nil' || s === 'NA' || s === 'TBC' || s === 'N/A' || s === '-') return '';
+    return s;
+}
+
 function getClosurePeriods(rec) {
     const periods = [];
     for (let q = 1; q <= 4; q++) {
         const s = parseDate(rec[`q${q}_cleaningstartdate`]);
         const e = parseDate(rec[`q${q}_cleaningenddate`]);
-        if (s && e) periods.push({ type: 'cleaning', start: s, end: e, remarks: rec[`remarks_q${q}`] || '' });
+        if (s && e) periods.push({ type: 'cleaning', start: s, end: e, remarks: cleanRemarks(rec[`remarks_q${q}`]) });
     }
     const ws = parseDate(rec.other_works_startdate);
     const we = parseDate(rec.other_works_enddate);
-    if (ws && we) periods.push({ type: 'other_works', start: ws, end: we, remarks: rec.remarks_other_works || '' });
+    if (ws && we) periods.push({ type: 'other_works', start: ws, end: we, remarks: cleanRemarks(rec.remarks_other_works) });
     return periods;
 }
 
@@ -661,7 +666,7 @@ async function searchMarket(query) {
             start_date: toISO(p.start),
             end_date: toISO(p.end),
         }));
-        results.push({ name, closures, remarks: rec.remarks_other_works || '', photourl: getPhoto(rec) });
+        results.push({ name, closures, remarks: cleanRemarks(rec.remarks_other_works), photourl: getPhoto(rec) });
     }
     return results;
 }
@@ -808,7 +813,7 @@ async function showFavourites() {
         // Sort key: closed now = -1, then by days until next closure, no closure = Infinity
         const sortKey = status === 'closed' ? -1 : (nextClosure ? nextClosure.daysUntil : Infinity);
 
-        results.push({ name, closures, remarks: rec.remarks_other_works || '', photourl: getPhoto(rec), status, nextClosure, currentEnd, sortKey });
+        results.push({ name, closures, remarks: cleanRemarks(rec.remarks_other_works), photourl: getPhoto(rec), status, nextClosure, currentEnd, sortKey });
     }
 
     if (!results.length) {
