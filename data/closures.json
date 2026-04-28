@@ -1,5 +1,5 @@
 {
-  "fetched_at": "2026-04-22T22:17:03Z",
+  "fetched_at": "2026-04-28T22:21:30Z",
   "total": 123,
   "records": [
     {
@@ -759,8 +759,8 @@
       "q1_cleaningstartdate": "30/3/2026",
       "q1_cleaningenddate": "31/3/2026",
       "remarks_q1": "nil",
-      "q2_cleaningstartdate": "1/6/2026",
-      "q2_cleaningenddate": "3/6/2026",
+      "q2_cleaningstartdate": "22/6/2026",
+      "q2_cleaningenddate": "24/6/2026",
       "remarks_q2": "nil",
       "q3_cleaningstartdate": "21/9/2026",
       "q3_cleaningenddate": "22/9/2026",
@@ -2259,8 +2259,8 @@
       "q1_cleaningstartdate": "9/3/2026",
       "q1_cleaningenddate": "9/3/2026",
       "remarks_q1": "nil",
-      "q2_cleaningstartdate": "16/6/2026",
-      "q2_cleaningenddate": "16/6/2026",
+      "q2_cleaningstartdate": "15/6/2026",
+      "q2_cleaningenddate": "15/6/2026",
       "remarks_q2": "nil",
       "q3_cleaningstartdate": "14/9/2026",
       "q3_cleaningenddate": "16/9/2026",
