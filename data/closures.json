@@ -1,5 +1,5 @@
 {
-  "fetched_at": "2026-06-01T22:44:18Z",
+  "fetched_at": "2026-06-02T22:42:23Z",
   "total": 123,
   "records": [
     {
@@ -1121,7 +1121,7 @@
       "remarks_q1": "Blk 79 closed on 30/3/2026, Blk 79A closed on 31/3/2026.",
       "q2_cleaningstartdate": "22/6/2026",
       "q2_cleaningenddate": "23/6/2026",
-      "remarks_q2": "Blk 79 closed on 22/6/2026, Blk 79A closed on 23/6/2026.",
+      "remarks_q2": "Both closed from 22 June to 23 June 2026",
       "q3_cleaningstartdate": "28/9/2026",
       "q3_cleaningenddate": "29/9/2026",
       "remarks_q3": "Blk 79 closed on 28/9/2026, Blk 79A closed on 29/9/2026.",
