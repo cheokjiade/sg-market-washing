@@ -1,5 +1,5 @@
 {
-  "fetched_at": "2026-06-03T22:43:55Z",
+  "fetched_at": "2026-06-04T22:31:40Z",
   "total": 123,
   "records": [
     {
@@ -192,8 +192,8 @@
       "q2_cleaningstartdate": "TBC",
       "q2_cleaningenddate": "TBC",
       "remarks_q2": "nil",
-      "q3_cleaningstartdate": "14/9/2026",
-      "q3_cleaningenddate": "15/9/2026",
+      "q3_cleaningstartdate": "TBC",
+      "q3_cleaningenddate": "TBC",
       "remarks_q3": "nil",
       "q4_cleaningstartdate": "14/12/2026",
       "q4_cleaningenddate": "16/12/2026",
