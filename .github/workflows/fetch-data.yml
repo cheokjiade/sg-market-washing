@@ -107,7 +107,23 @@ jobs:
       - name: Check for changes
         id: changes
         run: |
-          git diff --quiet data/closures.json && echo "changed=false" >> "$GITHUB_OUTPUT" || echo "changed=true" >> "$GITHUB_OUTPUT"
+          # Compare against the committed version with fetched_at stripped,
+          # so a run where only the timestamp changed doesn't create a commit
+          if git show HEAD:data/closures.json > /tmp/old_closures.json 2>/dev/null; then
+            jq -S 'del(.fetched_at)' /tmp/old_closures.json > /tmp/old_cmp.json
+            jq -S 'del(.fetched_at)' data/closures.json > /tmp/new_cmp.json
+            if cmp -s /tmp/old_cmp.json /tmp/new_cmp.json; then
+              echo "Market data unchanged (only fetched_at differs) - skipping commit"
+              git checkout -- data/closures.json
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "Market data changed"
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "data/closures.json not yet committed - first fetch"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Commit and push
         if: steps.changes.outputs.changed == 'true'
