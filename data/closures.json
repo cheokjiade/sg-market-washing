@@ -1,5 +1,5 @@
 {
-  "fetched_at": "2026-07-10T22:56:40Z",
+  "fetched_at": "2026-07-15T22:55:22Z",
   "total": 123,
   "records": [
     {
@@ -3612,8 +3612,8 @@
       "q2_cleaningstartdate": "8/6/2026",
       "q2_cleaningenddate": "9/6/2026",
       "remarks_q2": "nil",
-      "q3_cleaningstartdate": "14/9/2026",
-      "q3_cleaningenddate": "15/9/2026",
+      "q3_cleaningstartdate": "20/7/2026",
+      "q3_cleaningenddate": "23/7/2026",
       "remarks_q3": "nil",
       "q4_cleaningstartdate": "14/12/2026",
       "q4_cleaningenddate": "15/12/2026",
